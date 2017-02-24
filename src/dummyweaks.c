@@ -76,6 +76,29 @@ const char *(__attribute__((pure)) __liballocs_uniqtype_name)(const struct uniqt
 	return NULL;
 }
 
+struct uniqtype *__liballocs_get_alloc_type(void *obj)
+{
+	return NULL;
+}
+
+void *__private_malloc(size_t size)
+{
+	return NULL;
+}
+
+void __private_free(void *ptr)
+{
+
+}
+
+struct allocator;
+struct liballocs_err *__liballocs_get_alloc_info(const void *obj, struct allocator **out_allocator,
+	const void **out_alloc_start, unsigned long *out_alloc_size_bytes, 
+	struct uniqtype **out_alloc_uniqtype, const void **out_alloc_site)
+{
+	return NULL;
+}
+
 struct mcontext;
 struct uniqtype *
 __liballocs_make_array_precise_with_memory_bounds(struct uniqtype *in,
@@ -89,4 +112,24 @@ void __liballocs_report_wild_address(const void *ptr)
 {
 }
 
-int __generic_malloc_allocator;
+/* HACK: for copy-reloc'ing clients, must be at least as big as 
+ * the real structure! Bah. */
+int __generic_malloc_allocator[100];
+
+void __liballocs_malloc_post_init(void) {}
+void __liballocs_malloc_pre_alloc(size_t *p_size, size_t *p_alignment, const void *caller)
+{}
+void 
+__liballocs_malloc_post_successful_alloc(void *allocptr, size_t modified_size, size_t modified_alignment, 
+				size_t requested_size, size_t requested_alignment, const void *caller)
+{}
+void __liballocs_malloc_pre_nonnull_free(void *userptr, size_t freed_usable_size) {}
+void __liballocs_malloc_post_nonnull_free(void *userptr) {}
+
+void __liballocs_malloc_pre_nonnull_nonzero_realloc(void *userptr, size_t size, const void *caller) 
+{}
+
+void __liballocs_malloc_post_nonnull_nonzero_realloc(void *userptr, 
+   size_t old_usable_size,
+   const void *caller, void *__new_allocptr)
+{}

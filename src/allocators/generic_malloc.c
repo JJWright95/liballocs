@@ -207,6 +207,7 @@ do_init(void)
 }
 
 void post_init(void) __attribute__((visibility("hidden")));
+void __liballocs_malloc_post_init(void) __attribute__((alias("post_init")));
 void post_init(void)
 {
 	do_init();
@@ -449,9 +450,15 @@ index_insert(void *new_userchunkaddr, size_t modified_size, const void *caller)
 	
 	/* Make sure the parent bigalloc knows we're suballocating it. */
 	char *allocptr = userptr_to_allocptr(new_userchunkaddr);
+	struct insert *p_insert = insert_for_chunk(new_userchunkaddr);
 	struct big_allocation *containing_bigalloc = __lookup_deepest_bigalloc(
 		userptr_to_allocptr(new_userchunkaddr));
-	if (!containing_bigalloc) abort();
+	if (!containing_bigalloc)
+	{
+		debug_printf(1, "Warning: heap region around %p not contained in any bigalloc (called from %p)\n", 
+			new_userchunkaddr, caller);
+		goto after_promotion;
+	}
 	if (unlikely(!containing_bigalloc->suballocator))
 	{
 		containing_bigalloc->suballocator = &__generic_malloc_allocator;
@@ -460,7 +467,6 @@ index_insert(void *new_userchunkaddr, size_t modified_size, const void *caller)
 	// FIXME: split alloca off into a separate table?
 	
 	/* Populate our extra in-chunk fields */
-	struct insert *p_insert = insert_for_chunk(new_userchunkaddr);
 	p_insert->alloc_site_flag = 0U;
 	p_insert->alloc_site = (uintptr_t) caller;
 	
@@ -490,6 +496,7 @@ index_insert(void *new_userchunkaddr, size_t modified_size, const void *caller)
 	/* if we got here, it's going in l1 */
 	if (modified_size > biggest_unpromoted_object) biggest_unpromoted_object = modified_size;
 
+after_promotion: ;
 	struct entry *index_entry = INDEX_LOC_FOR_ADDR(new_userchunkaddr);
 
 	/* DEBUGGING: sanity check entire bin */
@@ -540,14 +547,23 @@ post_successful_alloc(void *allocptr, size_t modified_size, size_t modified_alig
 		size_t requested_size, size_t requested_alignment, const void *caller)
 		__attribute__((visibility("hidden")));
 void 
+__liballocs_malloc_post_successful_alloc(void *allocptr, size_t modified_size, size_t modified_alignment, 
+		size_t requested_size, size_t requested_alignment, const void *caller)
+		__attribute__((alias("post_successful_alloc")));
+void 
 post_successful_alloc(void *allocptr, size_t modified_size, size_t modified_alignment, 
 		size_t requested_size, size_t requested_alignment, const void *caller)
 {
+	if (EXTRA_INSERT_SPACE > 0 && allocptr) {
+		memset((char *) allocptr + requested_size, 0xcc, malloc_usable_size(allocptr) - requested_size);
+	}
 	index_insert(allocptr /* == userptr */, modified_size, __current_allocsite ? __current_allocsite : caller);
 	safe_to_call_malloc = 1; // if somebody succeeded, anyone should succeed
 }
 
 void pre_alloc(size_t *p_size, size_t *p_alignment, const void *caller) __attribute__((visibility("hidden")));
+void __liballocs_malloc_pre_alloc(size_t *p_size, size_t *p_alignment, const void *caller)
+	__attribute__((alias("pre_alloc")));
 void pre_alloc(size_t *p_size, size_t *p_alignment, const void *caller)
 {
 	/* We increase the size by the amount of extra data we store, 
@@ -730,16 +746,21 @@ out:
 }
 
 void pre_nonnull_free(void *userptr, size_t freed_usable_size) __attribute__((visibility("hidden")));
+void __liballocs_malloc_pre_nonnull_free(void *userptr, size_t freed_usable_size)
+		__attribute__((alias("pre_nonnull_free")));
 void pre_nonnull_free(void *userptr, size_t freed_usable_size)
 {
 	index_delete(userptr/*, freed_usable_size*/);
 }
 
 void post_nonnull_free(void *userptr) __attribute__((visibility("hidden")));
+void __liballocs_malloc_post_nonnull_free(void *userptr) __attribute__((alias("post_nonnull_free")));
 void post_nonnull_free(void *userptr) 
 {}
 
 void pre_nonnull_nonzero_realloc(void *userptr, size_t size, const void *caller) __attribute__((visibility("hidden")));
+void __liballocs_malloc_pre_nonnull_nonzero_realloc(void *userptr, size_t size, const void *caller) 
+		__attribute__((alias("pre_nonnull_nonzero_realloc")));
 void pre_nonnull_nonzero_realloc(void *userptr, size_t size, const void *caller)
 {
 	/* When this happens, we *may or may not be freeing an area*
@@ -763,6 +784,14 @@ void pre_nonnull_nonzero_realloc(void *userptr, size_t size, const void *caller)
 
 	index_delete(userptr/*, malloc_usable_size(ptr)*/);
 }
+void post_nonnull_nonzero_realloc(void *userptr, 
+	size_t modified_size, 
+	size_t old_usable_size,
+	const void *caller, void *__new_allocptr) __attribute__((visibility("hidden")));
+void __liballocs_malloc_post_nonnull_nonzero_realloc(void *userptr, 
+	size_t modified_size, 
+	size_t old_usable_size,
+	const void *caller, void *__new_allocptr) __attribute__((alias("post_nonnull_nonzero_realloc")));
 void post_nonnull_nonzero_realloc(void *userptr, 
 	size_t modified_size, 
 	size_t old_usable_size,
@@ -804,6 +833,9 @@ void post_nonnull_nonzero_realloc(void *userptr,
 	
 	/* If the old alloc has gone away, do the malloc_hooks call the free hook on it? 
 	 * YES: it was done before the realloc, in the pre-hook. */
+	if (EXTRA_INSERT_SPACE > 0 && __new_allocptr) {
+		memset((char *) insert_for_chunk_and_usable_size(__new_allocptr, malloc_usable_size(__new_allocptr)) - EXTRA_INSERT_SPACE, 0xcc, EXTRA_INSERT_SPACE);
+	}
 }
 
 // same but zero bytes, not bits
