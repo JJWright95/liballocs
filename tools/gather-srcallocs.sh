@@ -28,7 +28,7 @@ all_obj_allocs_file="$1"
 
 # Do a per-CU loop over the file and dispatch to a per-language allocs-gatherer
 
-cat "$all_obj_allocs_file" | cut -f1 | sort | uniq | while read obj rest; do
+cat "$all_obj_allocs_file" | cut -f1 | LC_ALL=C sort | uniq | while read obj rest; do
     echo "Saw line $obj $rest" 1>&2
     all_cus_info="$( get_cu_info "$obj" )"
     
@@ -42,4 +42,4 @@ cat "$all_obj_allocs_file" | cut -f1 | sort | uniq | while read obj rest; do
             ;;
         esac
     done
-done | pad_numbers | sort -t$'\t' -k1 -k2 | uniq        #use_src_realpaths | 
+done | pad_numbers | LC_ALL=C sort -t$'\t' -k1 -k2 | uniq        #use_src_realpaths | 
