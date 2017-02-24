@@ -128,24 +128,26 @@ class AllocsCompilerWrapper(CompilerWrapper):
             # Now deal with wrapped functions
             wrappedFns = self.allWrappedSymNames()
             self.debugMsg("Looking for wrapped functions that need unbinding\n")
-            cmdstring = "objdump -t \"%s\" | grep -v UND | egrep \"[ \\.](%s)$\"; exit $?" \
+            cmdstring = "nm -fbsd \"%s\" | grep -v '^[0-9a-f ]\+ U ' | egrep \"^[0-9a-f ]+ . (%s)$\" | sed 's/^[0-9a-f ]\+ . //'" \
                 % (filename, "|".join(wrappedFns))
             self.debugMsg("cmdstring for objdump is " + cmdstring + "\n")
-            grep_ret = subprocess.call(["sh", "-c", cmdstring], stdout=errfile, stderr=errfile)
-            if grep_ret == 0:
+            grep_output = subprocess.Popen(["sh", "-c", cmdstring], stdout=subprocess.PIPE, stderr=errfile).communicate()[0]
+            toUnbind = [l for l in grep_output.split("\n") if l != '']
+            self.debugMsg("grep for defined alloc fns in %s returned %s\n" % (filename, str(toUnbind)))
+            if grep_output != "":
                 # we need to unbind. We unbind the allocsite syms
                 # *and* --prefer-non-section-relocs. 
                 # This will give us a file with __def_ and __ref_ symbols
                 # for the allocation function. We then rename these to 
                 # __real_ and __wrap_ respectively. 
                 backup_filename = os.path.splitext(filename)[0] + ".backup.o"
-                self.debugMsg("Found that we need to unbind some or all of symbols [%s]... making backup as %s\n" % \
-                    (", ".join(wrappedFns), backup_filename))
+                self.debugMsg("Found that we need to unbind symbols [%s]... making backup as %s\n" % \
+                    (", ".join(toUnbind), backup_filename))
                 cp_ret = subprocess.call(["cp", filename, backup_filename], stderr=errfile)
                 if cp_ret != 0:
                     self.print_errors(errfile)
                     return cp_ret
-                unbind_pairs = [["--unbind-sym", sym] for sym in wrappedFns]
+                unbind_pairs = [["--unbind-sym", sym] for sym in toUnbind]
                 unbind_cmd = ["objcopy", "--prefer-non-section-relocs"] \
                  + [opt for pair in unbind_pairs for opt in pair] \
                  + [filename]
@@ -158,14 +160,30 @@ class AllocsCompilerWrapper(CompilerWrapper):
                 else:
                     # one more objcopy to rename the __def_ and __ref_ symbols
                     self.debugMsg("Renaming __def_ and __ref_ alloc symbols\n")
-                    def_ref_args = [["--redefine-sym", "__def_" + sym + "=" + sym, \
-                       "--redefine-sym", "__ref_" + sym + "=__wrap_" + sym] for sym in wrappedFns]
+                    # instead of objcopying to replace __def_<sym> with <sym>,
+                    # we use ld -r to define <sym> and __real_<sym> as *extra* symbols
+                    ref_args = [["--redefine-sym", "__ref_" + sym + "=__wrap_" + sym] for sym in toUnbind]
                     objcopy_ret = subprocess.call(["objcopy", "--prefer-non-section-relocs"] \
-                     + [opt for seq in def_ref_args for opt in seq] \
+                     + [opt for seq in ref_args for opt in seq] \
                      + [filename], stderr=errfile)
                     if objcopy_ret != 0:
                         self.print_errors(errfile)
                         return objcopy_ret
+                    tmp_filename = os.path.splitext(filename)[0] + ".tmp.o"
+                    cp_ret = subprocess.call(["cp", filename, tmp_filename], stderr=errfile)
+                    if cp_ret != 0:
+                        self.print_errors(errfile)
+                        return cp_ret
+                    def_args = [["--defsym", sym + "=__def_" + sym, \
+                        "--defsym", "__real_" + sym + "=__def_" + sym, \
+                        ] for sym in toUnbind]
+                    ld_ret = subprocess.call(["ld", "-r"] \
+                     + [opt for seq in def_args for opt in seq] \
+                     + [tmp_filename, "-o", filename], stderr=errfile)
+                    if ld_ret != 0:
+                        self.debugMsg("problem doing ld -r (__real_ = __def_) (ret %d)\n" % ld_ret)
+                        self.print_errors(errfile)
+                        return ld_ret
 
             self.debugMsg("Looking for wrapped functions that need globalizing\n")
             # grep for local symbols -- a lower-case letter after the symname is the giveaway
@@ -183,6 +201,48 @@ class AllocsCompilerWrapper(CompilerWrapper):
             # no need to objcopy; all good
             self.debugMsg("No need to globalize\n")
             return 0
+
+    def fixupLinkedObject(self, filename, is_exe, errfile):
+        self.debugMsg("Fixing up linked output object: %s\n" % filename)
+        wrappedFns = self.allWrappedSymNames()
+        with (self.makeErrFile(os.path.realpath(filename) + ".fixuplog", "w+") if not errfile else errfile) as errfile:
+            if is_exe:
+                # for any allocator symbols that it defines, we must
+                # 1. link in the callee-side stubs it needs
+                #          (CAN'T do that now of course -- assume it's already been done)
+                # 2. rename __wrap___real_<allocator> to <allocator> 
+                #       and <allocator> to something arbitrary
+                # In this way, local callers must already have had the extra 
+                #   --wrap __real_<allocator> 
+                # argument in order to get the callee instr. Internal calls are wired up properly.
+                # Next, to allow lib-to-exe calls to hit the callee instr,
+                # use objcopy to rename them
+                # ARGH. This won't work because objcopy can't rename dynsys 
+                pass
+                # what allocator fns does it define globally?
+                # grep for global symbols -- an upper-case letter after the symname is the giveaway
+#                cmdstring = "nm -fposix --extern-only --defined-only \"%s\" | sed 's/ [A-Z] [0-9a-f ]\\+$//' | egrep \"^__wrap___real_(%s)$\""\
+#                    % (filename, "|".join(wrappedFns))
+#                self.debugMsg("cmdstring is %s\n" % cmdstring)
+#                wrappedRealNames = subprocess.Popen(["sh", "-c", cmdstring], stderr=errfile, stdout=subprocess.PIPE).communicate()[0].split("\n")
+#                self.debugMsg("output was %s\n" % wrappedRealNames)
+#                if len(wrappedRealNames) > 0:
+#                    # firstly do the bare (non-wrap-real-prefixed) ones
+#                    bareNames = [sym[len("__wrap___real_"):] for sym in wrappedRealNames]
+#                    self.debugMsg("Renaming __wrap___real_* alloc symbols: %s\n" % bareNames)
+#                    redefine_args = [["--redefine-sym", sym + "=" + "__liballocs_bare_" + sym] \
+#                        for sym in bareNames if sym != ""]
+#                    objcopy_ret = subprocess.call(["objcopy"] \
+#                     + [opt for seq in redefine_args for opt in seq] \
+#                     + [filename], stderr=errfile)
+#                    if objcopy_ret != 0:
+#                        self.print_errors(errfile)
+#                        return objcopy_ret
+#                    redefine_args = [["--redefine-sym", "__wrap___real_" + sym + "=" + sym] \
+#                       for sym in bareNames if sym != ""]
+#                    objcopy_ret = subprocess.call(["objcopy"] \
+#                     + [opt for seq in redefine_args for opt in seq] \
+#                     + [filename], stderr=errfile)
 
     def getVerboseArgs(self):
         return []
@@ -274,6 +334,8 @@ class AllocsCompilerWrapper(CompilerWrapper):
                     sourceInputFiles)
             else:
                 passedThroughArgs = sys.argv[1:]
+            
+            buildingSharedObject = ("-shared" in passedThroughArgs) or ("-G" in passedThroughArgs)
 
             # we pass through the input .o and .a files
             self.debugMsg("passedThroughArgs is %s\n" % " ".join(passedThroughArgs))
@@ -395,8 +457,7 @@ class AllocsCompilerWrapper(CompilerWrapper):
                     # most of the user's options, 
                     # then compile with a more tightly controlled set
                     extraFlags = self.getStubGenCompileArgs()
-                    if "-shared" in passedThroughArgs \
-                        or "-G" in passedThroughArgs:
+                    if buildingSharedObject:
                         extraFlags += ["-fPIC"]
                     else:
                         pass
@@ -531,6 +592,7 @@ class AllocsCompilerWrapper(CompilerWrapper):
 
         else: # isLinkCommand
             if not "-r" in passedThroughArgs and not "-Wl,-r" in passedThroughArgs:
+                self.fixupLinkedObject(outputFile, not buildingSharedObject, None)
                 return self.doPostLinkMetadataBuild(outputFile)
             else:
                 return 0
